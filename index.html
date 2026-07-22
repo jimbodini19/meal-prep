@@ -7,6 +7,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>Meal Prep Planner</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%230e1116'/><text y='72' x='50' text-anchor='middle' font-size='58'>🍱</text></svg>">
 <style>
   :root{
     --bg:#0e1116; --bg-grad:radial-gradient(1200px 500px at 50% -10%, #16202b 0%, #0e1116 60%);
@@ -75,6 +76,13 @@
   .histRow{display:flex; align-items:center; gap:8px; padding:9px 2px; border-bottom:1px solid var(--line); font-size:13.5px;}
   .histRow:last-child{border-bottom:0;}
   .bigStatus{display:flex; align-items:center; gap:10px; padding:12px; border-radius:12px; background:var(--accent-soft); color:var(--accent); font-weight:800; font-size:15px; margin-top:10px;}
+  .chips{display:flex; gap:8px; overflow-x:auto; padding:2px; margin:0 0 8px; scrollbar-width:none;}
+  .chips::-webkit-scrollbar{display:none;}
+  .chips .chip{flex:none;}
+  #toast{position:fixed; bottom:calc(80px + env(safe-area-inset-bottom)); left:50%; transform:translateX(-50%); background:var(--card-2); border:1px solid var(--line); color:var(--ink); padding:10px 18px; border-radius:99px; font-size:13px; font-weight:700; box-shadow:var(--shadow); z-index:99; opacity:0; pointer-events:none; transition:opacity .25s, transform .25s; white-space:nowrap;}
+  #toast.show{opacity:1; transform:translateX(-50%) translateY(-4px);}
+  #refreshBtn{border:1px solid var(--line); background:var(--card-2); color:var(--muted); border-radius:99px; width:30px; height:30px; font-size:15px; cursor:pointer; margin-left:8px;}
+  .secCount{font-weight:600; color:var(--muted); font-size:11px; margin-left:6px;}
   .toolbar{display:flex; gap:8px; margin:2px 0 12px;}
   .toolbar input{flex:1;}
   .progress{height:7px; border-radius:99px; background:var(--card-2); border:1px solid var(--line); overflow:hidden; flex:1;}
@@ -92,10 +100,14 @@
 <body>
 <header>
   <h1>Meal Prep Planner</h1>
-  <span id="syncBadge">local only</span>
+  <span style="display:flex; align-items:center">
+    <span id="syncBadge">local only</span>
+    <button id="refreshBtn" aria-label="Sync now" onclick="manualSync()">↻</button>
+  </span>
 </header>
 <main id="view"></main>
 <nav id="nav"></nav>
+<div id="toast" role="status"></div>
 
 <dialog id="editDlg"></dialog>
 
@@ -175,6 +187,12 @@ function meetsFloor(r){ const m=r.macrosPerServing||{}; return (m.protein_g||0)>
 function currentPlan(){ return state.plans.find(p=>p.weekOf===state.week); }
 
 /* ================= SYNC ================= */
+const APP_VERSION='3.0';
+let toastTimer=null;
+function toast(msg){
+  const el=document.getElementById('toast'); el.textContent=msg; el.classList.add('show');
+  clearTimeout(toastTimer); toastTimer=setTimeout(()=>el.classList.remove('show'),1900);
+}
 async function api(action, payload){
   if(!state.endpoint) return null;
   const res = await fetch(state.endpoint, {method:'POST', headers:{'Content-Type':'text/plain;charset=utf-8'}, body:JSON.stringify({action, payload})});
@@ -182,28 +200,66 @@ async function api(action, payload){
   if(j && j.error) throw new Error(j.error);
   return j;
 }
+function queueKey(a,p){ return a==='saveRecipe'?'r:'+p.id : a==='savePlan'?'p:'+p.weekOf : a==='deletePlan'?'dp:'+p.weekOf : a; }
+function pushSync(action,payload){
+  if(!state.endpoint) return Promise.resolve(null);
+  return api(action,payload).then(r=>{
+    if(!state.online){ state.online=true; updateBadge(); }
+    state.lastSync=Date.now(); save();
+    return r;
+  }).catch(e=>{
+    const key=queueKey(action,payload);
+    state.pending=(state.pending||[]).filter(q=>queueKey(q.action,q.payload)!==key);
+    state.pending.push({action,payload,ts:Date.now()});
+    if(state.online!==false){ state.online=false; updateBadge(); toast('Offline. Saved on this phone, will retry.'); }
+    save();
+  });
+}
+async function flushPending(){
+  if(!state.endpoint || !(state.pending||[]).length) return;
+  const q=[...state.pending];
+  for(const item of q){
+    try{ await api(item.action, item.payload); state.pending=state.pending.filter(x=>x!==item); save(); }
+    catch(e){ return; }
+  }
+  if(!(state.pending||[]).length) toast('Back online. All changes synced ✓');
+}
 async function pullAll(silent){
   if(!state.endpoint) return;
   try{
+    await flushPending();
     const d = await api('getAll',{});
     if(d.recipes && d.recipes.length) state.recipes = d.recipes;
     if(d.plans){ const byW={}; d.plans.forEach(p=>{ if(p&&p.weekOf) byW[p.weekOf]=p; }); state.plans=Object.values(byW); }
     if(d.prefs) state.prefs = d.prefs;
-    state.online = true; mergeSeeds(true); save(); render();
-  }catch(e){ state.online=false; render(); if(!silent) alert('Could not reach backend: '+e.message); }
+    state.online = true; state.lastSync=Date.now(); mergeSeeds(true); save(); render();
+  }catch(e){ state.online=false; render(); if(!silent) toast('Could not reach backend'); }
 }
-function pushRecipe(r){ api('saveRecipe', r).catch(e=>console.warn('sync',e)); }
-function pushPlan(p){ api('savePlan', p).catch(e=>console.warn('sync',e)); }
+async function manualSync(){
+  if(!state.endpoint){ toast('No backend set. See Settings.'); return; }
+  toast('Syncing...');
+  await pullAll(true);
+  toast(state.online?'Up to date ✓':'Could not reach backend');
+}
+function pushRecipe(r){ return pushSync('saveRecipe', r); }
+function pushPlan(p){ return pushSync('savePlan', p); }
+setInterval(()=>{ if((state.pending||[]).length && state.endpoint) flushPending().then(updateBadge); }, 40000);
+document.addEventListener('visibilitychange', ()=>{ if(!document.hidden && state.endpoint) pullAll(true); });
 
 /* ================= RENDER ================= */
 const TABS=[['recipes','📖','Recipes'],['week','🗓️','This Week'],['grocery','🛒','Grocery'],['settings','⚙️','Settings']];
-function render(){
-  document.getElementById('nav').innerHTML = TABS.map(([id,ico,lbl])=>
-    `<button class="${state.tab===id?'active':''}" onclick="go('${id}')"><span class="ico">${ico}</span>${lbl}</button>`).join('');
+function updateBadge(){
   const badge=document.getElementById('syncBadge');
-  if(state.endpoint && state.online){ badge.textContent='synced'; badge.className='on'; }
+  const pend=(state.pending||[]).length;
+  if(state.endpoint && state.online && !pend){ badge.textContent='synced'; badge.className='on'; }
+  else if(state.endpoint && pend){ badge.textContent=pend+' unsent'; badge.className=''; }
   else if(state.endpoint){ badge.textContent='offline'; badge.className=''; }
   else { badge.textContent='local only'; badge.className=''; }
+}
+function render(){
+  document.getElementById('nav').innerHTML = TABS.map(([id,ico,lbl])=>
+    `<button class="${state.tab===id?'active':''}" aria-label="${lbl}" onclick="go('${id}')"><span class="ico">${ico}</span>${lbl}</button>`).join('');
+  updateBadge();
   const v=document.getElementById('view');
   if(state.tab==='recipes') v.innerHTML=viewRecipes();
   else if(state.tab==='week') v.innerHTML=viewWeek();
@@ -239,14 +295,15 @@ function viewRecipes(){
     <input placeholder="Search recipes..." value="${esc(state.search||'')}" oninput="state.search=this.value;save();render()">
     <button class="btn primary" onclick="openEdit()">+ Add</button>
   </div>
-  <div class="row" style="margin:0 2px 8px">
+  <div class="chips">
     ${[['all','All'],['chicken','Chicken'],['beef','Beef'],['pork','Pork'],['seafood','Seafood']].map(([k,l])=>
       `<button class="chip ${prot===k?'on':''}" onclick="state.recProt='${k}';save();render()">${l}</button>`).join('')}
   </div>
-  <div class="row" style="margin:0 2px 12px">
+  <div class="chips">
     ${[['all','All types'],['bowls','Bowls'],['pasta','Pasta'],['soups','Soups & stews'],['plates','Plates & bakes'],['liked','👍 Liked']].map(([k,l])=>
       `<button class="chip ${typ===k?'on':''}" onclick="state.recType='${k}';save();render()">${l}</button>`).join('')}
   </div>
+  <p class="muted" style="margin:0 4px 10px">${list.length} recipe${list.length===1?'':'s'}</p>
   ${list.map(cardRecipe).join('')||'<p class="muted">No recipes match these filters.</p>'}`;
 }
 function cardRecipe(r){
@@ -422,9 +479,10 @@ function viewWeek(){
     ${chosen?`<button class="btn ${plan.prepped?'':'primary'} flex1" onclick="markPrepped()">${plan.prepped?'Unmark prepped':'✓ Mark prepped'}</button>`:''}
   </div>
 
-  ${plan.prepped?'':`
-  <div class="sectionTitle">Add recipes</div>
-  <div class="row" style="margin:0 2px 10px">
+  ${plan.prepped?'':(complete&&!state.showPicker?`
+  <div class="row" style="margin:6px 0"><button class="btn flex1" onclick="state.showPicker=true;save();render()">Swap or add recipes ▾</button></div>`:`
+  <div class="sectionTitle">Add recipes ${complete?`<button class="btn sm" style="margin-left:6px" onclick="state.showPicker=false;save();render()">hide ▴</button>`:''}</div>
+  <div class="chips">
     ${[['all','All'],['rotation','Rotation'],['suggested','Suggestions']].map(([k,l])=>
       `<button class="chip ${filter===k?'on':''}" onclick="state.weekFilter='${k}';save();render()">${l}</button>`).join('')}
   </div>
@@ -452,7 +510,7 @@ function viewWeek(){
       <input type="checkbox" id="ovr" ${plan.override?'checked':''} onchange="setOverride(this.checked)" style="width:20px;height:20px">
       <span style="font-size:14px">Allow under-target recipes this week (override)</span>
     </div>
-  </div>`}
+  </div>`)}
 
   ${history.length?`<div class="sectionTitle">History</div>
   <div class="card">
@@ -530,16 +588,18 @@ function viewGrocery(){
     <span class="badge ${doneCount===keys.length&&keys.length?'b-ok':'b-tag'}">${doneCount}/${keys.length}</span></div>
     <div class="row" style="margin-top:10px"><div class="progress"><div style="width:${pct}%"></div></div></div>
     <div class="row" style="margin-top:12px">
-      <button class="btn sm" onclick="copyGroceryText()">📋 Copy list</button>
+      <button class="btn sm" onclick="shareGrocery()">📤 Share</button>
+      <button class="btn sm" onclick="copyGroceryText()">📋 Copy</button>
       <button class="btn sm" onclick="state.hideChecked=!state.hideChecked;save();render()">${state.hideChecked?'Show':'Hide'} checked</button>
-      <button class="btn sm danger" onclick="resetGrocery()">Reset checks</button>
+      <button class="btn sm danger" onclick="resetGrocery()">Reset</button>
     </div>
   </div>
   ${sections().filter(c=>byCat[c]).map(c=>{
     const rows=byCat[c].filter(([key])=>!state.hideChecked||!(plan.groceryChecked||{})[key]);
     if(!rows.length) return '';
+    const secDone=byCat[c].filter(([key])=>(plan.groceryChecked||{})[key]).length;
     return `
-    <div class="sectionTitle">${c.replace('-',' & ')}</div>
+    <div class="sectionTitle">${c.replace('-',' & ')}<span class="secCount">${secDone}/${byCat[c].length}</span></div>
     <div class="card">
       ${rows.map(([key,i])=>{
         const done=(plan.groceryChecked||{})[key];
@@ -567,8 +627,8 @@ function removeExtra(name){
   delete (plan.groceryChecked||{})['x:'+name.toLowerCase()];
   save(); render(); pushPlan(plan);
 }
-function copyGroceryText(){
-  const plan=currentPlan(); if(!plan) return;
+function buildGroceryText(){
+  const plan=currentPlan(); if(!plan) return '';
   const items={};
   plan.recipeIds.forEach(id=>{
     const r=state.recipes.find(x=>x.id===id); if(!r) return;
@@ -585,12 +645,27 @@ function copyGroceryText(){
     txt+='\n'+c.replace('-',' & ').toUpperCase()+'\n';
     byCat[c].forEach(i=>{ txt+='- '+i.item+(i.qty?' ('+fmtQty(i.qty)+' '+i.unit+')':'')+'\n'; });
   });
-  (navigator.clipboard?.writeText(txt)||Promise.reject()).then(()=>alert('List copied. Paste it anywhere.')).catch(()=>{
+  return txt;
+}
+function copyGroceryText(){
+  const txt=buildGroceryText(); if(!txt) return;
+  (navigator.clipboard?.writeText(txt)||Promise.reject()).then(()=>toast('List copied ✓')).catch(()=>{
     const ta=document.createElement('textarea'); ta.value=txt; document.body.appendChild(ta); ta.select();
-    document.execCommand('copy'); ta.remove(); alert('List copied.');
+    document.execCommand('copy'); ta.remove(); toast('List copied ✓');
   });
 }
-function fmtQty(q){ return Math.round(q*100)/100; }
+function shareGrocery(){
+  const txt=buildGroceryText(); if(!txt) return;
+  if(navigator.share) navigator.share({text:txt}).catch(()=>{});
+  else copyGroceryText();
+}
+function fmtQty(q){
+  q=Math.round(q*100)/100;
+  const whole=Math.floor(q), frac=Math.round((q-whole)*100);
+  const F={25:'¼',33:'⅓',50:'½',67:'⅔',75:'¾'};
+  if(F[frac]!==undefined) return (whole||'')+F[frac];
+  return q;
+}
 function checkItem(key,val){
   const plan=currentPlan(); if(!plan) return;
   plan.groceryChecked=plan.groceryChecked||{};
@@ -628,6 +703,14 @@ function viewSettings(){
   <div class="card">
     <h3>House rules</h3>
     <p class="muted">Floor: ${floorP()}g protein / ${floorF()}g fiber per serving. Avoids: ${(state.prefs?.avoid?.hard||[]).join('; ')}. Edit prefs via Claude or the Sheet.</p>
+  </div>
+  <div class="card">
+    <h3>Status</h3>
+    <p class="muted" style="margin:4px 0 0">
+      Version ${APP_VERSION} · ${state.lastSync?'last synced '+new Date(state.lastSync).toLocaleString([], {month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}):'never synced'}
+      ${(state.pending||[]).length?` · <strong>${state.pending.length} unsent change${state.pending.length===1?'':'s'}</strong>`:''}
+    </p>
+    ${(state.pending||[]).length?`<div class="row" style="margin-top:10px"><button class="btn sm" onclick="flushPending().then(()=>{updateBadge();render()})">Retry unsent now</button></div>`:''}
   </div>`;
 }
 function saveEndpoint(){ state.endpoint=document.getElementById('s-url').value.trim(); save(); render(); if(state.endpoint) pullAll(true); }
