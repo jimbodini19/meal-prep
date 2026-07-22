@@ -187,7 +187,7 @@ function meetsFloor(r){ const m=r.macrosPerServing||{}; return (m.protein_g||0)>
 function currentPlan(){ return state.plans.find(p=>p.weekOf===state.week); }
 
 /* ================= SYNC ================= */
-const APP_VERSION='3.0';
+const APP_VERSION='3.1';
 let toastTimer=null;
 function toast(msg){
   const el=document.getElementById('toast'); el.textContent=msg; el.classList.add('show');
