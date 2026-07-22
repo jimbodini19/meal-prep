@@ -341,6 +341,14 @@ function cardRecipe(r){
       <button class="btn sm" onclick="openEdit('${r.id}')">Edit</button>
       <button class="btn sm" onclick="toggleDetail('${r.id}')">Details</button>
     </div>
+    <div class="row" style="margin-top:8px">
+      ${(()=>{ const plan=currentPlan(); const inWeek=plan&&plan.recipeIds.includes(r.id);
+        const blocked=!meetsFloor(r) && !(plan&&plan.override);
+        if(plan&&plan.prepped) return inWeek?'<span class="badge b-ok">✓ this week (prepped)</span>':'';
+        if(inWeek) return `<button class="btn sm" style="width:100%; border-color:var(--accent); color:var(--accent)" onclick="toggleWeek('${r.id}')">✓ In week of ${fmtWeek(state.week)} · tap to remove</button>`;
+        if(blocked) return '<button class="btn sm" style="width:100%; opacity:.5" disabled>under macro floor · enable override in This Week</button>';
+        return `<button class="btn sm primary" style="width:100%" onclick="toggleWeek('${r.id}')">+ Add to week of ${fmtWeek(state.week)}</button>`; })()}
+    </div>
     <div id="det-${r.id}" style="display:none; margin-top:10px">
       <h4 class="sub">Ingredients (${r.servingsPerBatch||4} servings)</h4>
       ${(r.ingredients||[]).map(i=>`<div class="gItem"><span class="t">${esc(i.item)}${i.prepNote?` <span class="muted">(${esc(i.prepNote)})</span>`:''}</span><span class="q">${i.qty} ${esc(i.unit)}</span></div>`).join('')}
@@ -427,19 +435,10 @@ function viewWeek(){
   const chosen=plan.recipeIds.length;
   const servings=plan.recipeIds.reduce((n,id)=>n+((state.recipes.find(r=>r.id===id)||{}).servingsPerBatch||4),0);
   const isThis=state.week===mondayOf(new Date().toISOString().slice(0,10));
-  const lastProteins=prevWeekProteins();
-  const active=state.recipes.filter(r=>r.status!=='retired')
-    .slice().sort((a,b)=>{
-      const wa=a.lastPrepped?weeksSince(a.lastPrepped):999, wb=b.lastPrepped?weeksSince(b.lastPrepped):999;
-      return wb-wa;
-    });
   const todayMon=mondayOf(new Date().toISOString().slice(0,10));
   const history=state.plans.filter(p=>p.weekOf!==state.week && p.weekOf<todayMon && (p.recipeIds||[]).length)
     .slice().sort((a,b)=>b.weekOf.localeCompare(a.weekOf)).slice(0,6);
   const selected=plan.recipeIds.map(id=>state.recipes.find(r=>r.id===id)).filter(Boolean);
-  const filter=state.weekFilter||'all';
-  const pickable=active.filter(r=>!plan.recipeIds.includes(r.id))
-    .filter(r=>filter==='all' || (filter==='rotation'? r.status==='active' : r.status==='suggested'));
   const complete=chosen>=shape.recipesPerWeek;
   return `
   <div class="card">
@@ -479,38 +478,20 @@ function viewWeek(){
     ${chosen?`<button class="btn ${plan.prepped?'':'primary'} flex1" onclick="markPrepped()">${plan.prepped?'Unmark prepped':'✓ Mark prepped'}</button>`:''}
   </div>
 
-  ${plan.prepped?'':(complete&&!state.showPicker?`
-  <div class="row" style="margin:6px 0"><button class="btn flex1" onclick="state.showPicker=true;save();render()">Swap or add recipes ▾</button></div>`:`
-  <div class="sectionTitle">Add recipes ${complete?`<button class="btn sm" style="margin-left:6px" onclick="state.showPicker=false;save();render()">hide ▴</button>`:''}</div>
-  <div class="chips">
-    ${[['all','All'],['rotation','Rotation'],['suggested','Suggestions']].map(([k,l])=>
-      `<button class="chip ${filter===k?'on':''}" onclick="state.weekFilter='${k}';save();render()">${l}</button>`).join('')}
-  </div>
-  ${pickable.map(r=>{
-    const ok=meetsFloor(r);
-    const blocked=!ok && !plan.override;
-    const ago=r.lastPrepped?weeksSince(r.lastPrepped):null;
-    const prot=proteinOf(r);
-    const repeatProt=prot && lastProteins.includes(prot);
-    return `<div class="card weekCard" style="padding:12px 14px">
-      <div class="flex1">
-        <strong>${esc(r.name)}</strong>
-        <div class="row" style="margin-top:4px">
-          <span class="badge ${ok?'b-ok':'b-bad'}">${r.macrosPerServing?.protein_g??'?'}p / ${r.macrosPerServing?.fiber_g??'?'}f</span>
-          <span class="badge ${ago===null?'b-ok':'b-tag'}">${ago===null?'never made':(ago<=0?'recent':ago+'w ago')}</span>
-          ${repeatProt?`<span class="badge b-warn">${prot} again</span>`:''}
-          ${ok?'':'<span class="badge b-bad">under floor</span>'}
-        </div>
-      </div>
-      <button class="btn sm ${blocked?'':'primary'}" ${blocked?'disabled style="opacity:.5"':''} onclick="toggleWeek('${r.id}')">+ Add</button>
-    </div>`;
-  }).join('')||'<div class="card"><p class="muted" style="margin:0">No recipes in this filter.</p></div>'}
+  ${plan.prepped?'':`
+  ${complete?'':`<div class="card">
+    <div class="row">
+      <div class="flex1"><strong>Pick ${shape.recipesPerWeek-chosen} more</strong>
+      <div class="muted" style="margin-top:2px">Add meals from the Recipes tab. Fresh options are sorted to the top there.</div></div>
+      <button class="btn primary" onclick="go('recipes')">Browse →</button>
+    </div>
+  </div>`}
   <div class="card">
     <div class="row">
       <input type="checkbox" id="ovr" ${plan.override?'checked':''} onchange="setOverride(this.checked)" style="width:20px;height:20px">
       <span style="font-size:14px">Allow under-target recipes this week (override)</span>
     </div>
-  </div>`)}
+  </div>`}
 
   ${history.length?`<div class="sectionTitle">History</div>
   <div class="card">
@@ -555,6 +536,8 @@ function toggleWeek(id){
   if(!plan){ plan={weekOf:state.week, recipeIds:[], override:false, prepped:false, groceryChecked:{}, extras:[]}; state.plans.push(plan); }
   const i=plan.recipeIds.indexOf(id);
   if(i>=0) plan.recipeIds.splice(i,1); else plan.recipeIds.push(id);
+  const shape=state.prefs?.prepModel?.defaultShape||{recipesPerWeek:2};
+  toast(`Week of ${fmtWeek(state.week)}: ${plan.recipeIds.length}/${shape.recipesPerWeek} meals`);
   save(); render(); pushPlan(plan);
 }
 function setOverride(v){
