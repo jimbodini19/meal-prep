@@ -179,7 +179,7 @@ async function pullAll(silent){
   try{
     const d = await api('getAll',{});
     if(d.recipes && d.recipes.length) state.recipes = d.recipes;
-    if(d.plans) state.plans = d.plans;
+    if(d.plans){ const byW={}; d.plans.forEach(p=>{ if(p&&p.weekOf) byW[p.weekOf]=p; }); state.plans=Object.values(byW); }
     if(d.prefs) state.prefs = d.prefs;
     state.online = true; mergeSeeds(true); save(); render();
   }catch(e){ state.online=false; render(); if(!silent) alert('Could not reach backend: '+e.message); }
@@ -338,7 +338,8 @@ function viewWeek(){
       const wa=a.lastPrepped?weeksSince(a.lastPrepped):999, wb=b.lastPrepped?weeksSince(b.lastPrepped):999;
       return wb-wa;
     });
-  const history=state.plans.filter(p=>p.weekOf!==state.week && (p.recipeIds||[]).length)
+  const todayMon=mondayOf(new Date().toISOString().slice(0,10));
+  const history=state.plans.filter(p=>p.weekOf!==state.week && p.weekOf<todayMon && (p.recipeIds||[]).length)
     .slice().sort((a,b)=>b.weekOf.localeCompare(a.weekOf)).slice(0,6);
   const selected=plan.recipeIds.map(id=>state.recipes.find(r=>r.id===id)).filter(Boolean);
   const filter=state.weekFilter||'all';
@@ -424,9 +425,16 @@ function viewWeek(){
       ${p.prepped?'<span class="badge b-ok" style="flex:none">✓</span>':''}
       <span class="muted flex1" style="font-size:12.5px">${esc(names)}</span>
       ${plan.prepped?'':`<button class="btn sm" style="flex:none" onclick="copyWeek('${p.weekOf}')">Repeat</button>`}
+      <button class="btn sm danger" style="flex:none" onclick="deletePlanWeek('${p.weekOf}')">✕</button>
     </div>`;
   }).join('')}
   </div>`:''}`;
+}
+function deletePlanWeek(weekOf){
+  if(!confirm('Delete the week of '+fmtWeek(weekOf)+' from history?')) return;
+  state.plans=state.plans.filter(p=>p.weekOf!==weekOf);
+  save(); render();
+  api('deletePlan',{weekOf}).catch(e=>console.warn('deletePlan (backend may need update)',e));
 }
 function markPrepped(){
   const plan=currentPlan(); if(!plan||!plan.recipeIds.length) return;
